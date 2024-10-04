@@ -324,13 +324,13 @@ class Agent(object):
 				Q_target_next = Q_target_next.clamp(self.min_target, self.max_target)
 
 			# SAC
-			entropy_bonus = -self.args.alpha_sac * next_action_log_prob if "SAC" in self.args.policy or "REDQ" in self.args.policy else 0
+			entropy_bonus = -self.args.alpha_sac * next_action_log_prob if "SAC" in self.args.policy else 0
 
 			# SQT
-			std_q_target = self.args.alpha_sqt * Q_next.std(dim=1).mean() if "SQT" in self.args.policy else 0
+			std_q_target = self.args.alpha * Q_next.std(dim=1).mean() if "SQT" in self.args.policy else 0
 
 			# Ablation
-			std_q_target = self.args.alpha_sqt * Q_next.std(dim=1).unsqueeze(1) if "SQTA" in self.args.policy else 0
+			std_q_target = self.args.alpha * Q_next.std(dim=1).unsqueeze(1) if "SQTA" in self.args.policy else 0
 
 			with torch.no_grad():
 				actor, _ = self.actor(state, fixed_zs)

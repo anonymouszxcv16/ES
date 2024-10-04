@@ -15,9 +15,6 @@ def train_online(RL_agent, env, eval_env, args):
     # Time
     times = []
 
-    # Bias
-    biases = []
-
     # Initialize
     start_time = time.time()
     allow_train = False
@@ -27,7 +24,7 @@ def train_online(RL_agent, env, eval_env, args):
 
     # Train loop.
     for t in range(int(args.max_timesteps + 1)):
-        maybe_evaluate_and_print(RL_agent, eval_env, evals, times, t, start_time, args, biases)
+        maybe_evaluate_and_print(RL_agent, eval_env, evals, times, t, start_time, args)
 
         # Select action.
         if allow_train:
@@ -66,34 +63,13 @@ def train_online(RL_agent, env, eval_env, args):
 
 
 # Logs.
-def maybe_evaluate_and_print(RL_agent, eval_env, evals, times, t, start_time, args, biases):
+def maybe_evaluate_and_print(RL_agent, eval_env, evals, times, t, start_time, args):
     if t % args.eval_freq == 0:
         # Rewards
         total_reward = np.zeros(args.eval_eps)
 
-        # Predictions
-        total_prediction = np.zeros(args.eval_eps)
-
         for ep in range(args.eval_eps):
             state, done = eval_env.reset(), False
-
-            # Bias
-            with torch.no_grad():
-                # State
-                state = torch.tensor(state, dtype=torch.float).to(args.device)
-                state = state.unsqueeze(0)
-
-                # Action
-                action = RL_agent.select_action(state, args.use_checkpoints, use_exploration=False)
-                action = torch.tensor(action, dtype=torch.float).to(args.device)
-                action = action.unsqueeze(0)
-
-                # Embedding
-                fixed_target_zs = RL_agent.fixed_encoder_target.zs(state)
-                fixed_target_zsa = RL_agent.fixed_encoder_target.zsa(fixed_target_zs, action)
-
-                # Q-value
-                total_prediction[ep] = RL_agent.critic_target(state, action, fixed_target_zsa, fixed_target_zs).mean().item()
 
             # Episode
             while not done:
@@ -112,10 +88,7 @@ def maybe_evaluate_and_print(RL_agent, eval_env, evals, times, t, start_time, ar
         # Reward
         score = total_reward.mean().item()
 
-        # Bias
-        bias = torch.tensor((total_prediction - score) / score, dtype=torch.float).to(args.device).mean().abs().item()
-
-        print(f"Timesteps: {(t + 1):,.1f}\tMinutes {time_total:.1f}\tRewards: {score:,.1f}\tBias: {bias:,.2f}")
+        print(f"Timesteps: {(t + 1):,.1f}\tMinutes {time_total:.1f}\tRewards: {score:,.1f}")
 
         # Reward
         evals.append(score)
@@ -123,12 +96,9 @@ def maybe_evaluate_and_print(RL_agent, eval_env, evals, times, t, start_time, ar
         # Time
         times.append(time_total)
 
-        # Bias
-        biases.append(bias)
-
         # file.
         with open(f"./results/{args.env}/{args.file_name}", "w") as file:
-            file.write(f"{evals}\n{times}\n{biases}")
+            file.write(f"{evals}\n{times}")
 
 
 if __name__ == "__main__":
@@ -147,7 +117,7 @@ if __name__ == "__main__":
     parser.add_argument("--buffer_size", default=1e6, type=int)
 
     # SQT
-    parser.add_argument("--alpha_sqt", default=.1, type=float)
+    parser.add_argument("--alpha", default=1, type=float)
 
     # Environment.
     parser.add_argument("--env", default="HumanoidStandup-v2", type=str)
@@ -192,7 +162,7 @@ if __name__ == "__main__":
     name = f"{args.policy}_{args.env}_{args.seed}"
 
     print("---------------------------------------")
-    print(f"Algorithm: {args.policy}, Buffer size: {args.buffer_size:,.1f}, Environment: {args.env}, Seed: {args.seed}, Device: {RL_agent.device}")
+    print(f"Algorithm: {args.policy}, Alpha: {args.alpha}, Buffer size: {args.buffer_size:,.1f}, Environment: {args.env}, Seed: {args.seed}, Device: {RL_agent.device}")
     print("---------------------------------------")
 
     # Optimize.
