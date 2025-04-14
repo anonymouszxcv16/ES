@@ -48,11 +48,6 @@ class Hyperparameters:
     critic_activ: Callable = F.elu
     critic_lr: float = 3e-4
 
-    # Average Model
-    average_hdim: int = 256
-    average_activ: Callable = F.elu
-    average_lr: float = 3e-4
-
     # Actor Model
     actor_hdim: int = 256
     actor_activ: Callable = F.relu
@@ -67,128 +62,7 @@ def AvgL1Norm(x, eps=1e-8):
 def LAP_huber(x, min_priority=1):
     return torch.where(x < min_priority, 0.5 * x.pow(2), min_priority * x).sum(1).mean()
 
-# SALE Encoder (CNN-Based)
-class SALEEncoder(nn.Module):
-    """State-Action Latent Encoder (CNN-based light restrictor)."""
-    def __init__(self, state_dim, action_dim, args, zs_dim=256, hdim=256, activ=F.elu):
-        super(SALEEncoder, self).__init__()
-        self.activ = activ
 
-        # CNN-based state encoder (light restrictor)
-        self.conv1 = nn.Conv1d(in_channels=1, out_channels=16, kernel_size=3, stride=1, padding=1)
-        self.conv2 = nn.Conv1d(in_channels=16, out_channels=32, kernel_size=3, stride=1, padding=1)
-        self.conv3 = nn.Conv1d(in_channels=32, out_channels=64, kernel_size=3, stride=1, padding=1)
-        self.fc = nn.Linear(64 * state_dim, zs_dim)
-
-        # State-Action Encoder
-        self.zsa1 = nn.Linear(zs_dim + action_dim, hdim)
-        self.zsa2 = nn.Linear(hdim, hdim)
-        self.zsa3 = nn.Linear(hdim, zs_dim)
-
-        self.args = args
-
-    def zs(self, state):
-        # CNN feature extraction
-        state = state.unsqueeze(1)  # Add channel dimension
-        zs = F.relu(self.conv1(state))
-        zs = F.relu(self.conv2(zs))
-        zs = F.relu(self.conv3(zs))
-        zs = zs.view(zs.shape[0], -1)  # Flatten
-        zs = self.fc(zs)
-
-        return F.normalize(zs, p=2, dim=-1)  # Normalization
-
-    def zsa(self, zs, action):
-        # Fully connected transformation
-        zsa = self.activ(self.zsa1(torch.cat([zs, action], 1)))
-        zsa = self.activ(self.zsa2(zsa))
-        zsa = self.zsa3(zsa)
-
-        return zsa
-
-# Q-Function (RNN-Based, Infinite Light)
-class RNNCritic(nn.Module):
-    """Q-function using RNN to model infinite light/signal propagation."""
-    def __init__(self, state_dim, action_dim, args, zs_dim=256, hdim=256, num_layers=2, activ=F.elu):
-        super(RNNCritic, self).__init__()
-        self.activ = activ
-        self.args = args
-
-        self.rnn = nn.GRU(input_size=state_dim + action_dim, hidden_size=hdim, num_layers=num_layers, batch_first=True)
-
-        # Fully connected layers
-        self.q1 = nn.Linear(2 * zs_dim + hdim, hdim)
-        self.q2 = nn.Linear(hdim, hdim)
-        self.q3 = nn.Linear(hdim, 1)
-
-    def forward(self, state, action, zsa, zs, hidden_state=None):
-        sa = torch.cat([state, action], 1).unsqueeze(1)  # Add sequence dimension
-        output, hidden_state = self.rnn(sa, hidden_state)
-
-        # Take last timestep output
-        q = self.activ(self.q1(torch.cat([zsa, zs, output.squeeze(1)], 1)))
-        q = self.activ(self.q2(q))
-        q = self.q3(q)
-
-        return q
-
-# Actor (Transformer-Based, Focus Mechanism)
-class TransformerActor(nn.Module):
-    """Actor using Transformer layers for focused decision making."""
-    def __init__(self, state_dim, action_dim, args, LOG_SIG_MIN, LOG_SIG_MAX, ACTION_BOUND_EPSILON, zs_dim=256, hdim=256, activ=F.relu):
-        super(TransformerActor, self).__init__()
-        self.activ = activ
-
-        self.embedding = nn.Linear(state_dim, hdim)
-        self.transformer = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(d_model=hdim, nhead=4, dim_feedforward=hdim, activation="relu"),
-            num_layers=2
-        )
-
-        self.l1 = nn.Linear(zs_dim + hdim, hdim)
-        self.l2 = nn.Linear(hdim, hdim)
-        self.l3 = nn.Linear(hdim, action_dim)
-
-        self.log_std = nn.Linear(hdim, action_dim)
-
-        # SAC
-        self.LOG_SIG_MIN = LOG_SIG_MIN
-        self.LOG_SIG_MAX = LOG_SIG_MAX
-        self.ACTION_BOUND_EPSILON = ACTION_BOUND_EPSILON
-
-        self.args = args
-
-    def forward(self, state, zs, deterministic=False, return_log_prob=True):
-        state_embed = self.embedding(state).unsqueeze(0)  # Add sequence dimension
-        state_embed = self.transformer(state_embed).squeeze(0)  # Pass through Transformer
-
-        a = torch.cat([state_embed, zs], 1)
-
-        a = self.activ(self.l1(a))
-        a = self.activ(self.l2(a))
-
-        mean = self.l3(a)
-
-        log_std = self.log_std(a)
-        log_std = torch.clamp(log_std, self.LOG_SIG_MIN, self.LOG_SIG_MAX)
-        std = torch.exp(log_std)
-
-        normal = Normal(mean, std)
-
-        if deterministic:
-            pre_tanh_value = mean
-            action = torch.tanh(mean)
-        else:
-            pre_tanh_value = normal.rsample()
-            action = torch.tanh(pre_tanh_value)
-
-        if return_log_prob:
-            log_prob = normal.log_prob(pre_tanh_value)
-            log_prob = log_prob.mean(1, keepdim=True)
-        else:
-            log_prob = None
-
-        return action, log_prob
 
 # Actor.
 class Actor(nn.Module):
@@ -386,9 +260,6 @@ class Agent(object):
         # EE value.
         self.ee_value = 0
 
-        # CQL value.
-        self.cql_value = 0
-
     def compute_cql_loss(self, state, action, zsa, zs):
         # Sample random actions uniformly
         batch_size = state.size(0)
@@ -469,10 +340,6 @@ class Agent(object):
             # EE value.
             ee_value = Q_next.std(1, keepdim=True).mean().item()
 
-            if "REDQ" in self.args.policy:
-                samples = torch.randint(low=0, high=self.args.N, size=(self.args.M,))
-                Q_next = Q_next[:, samples]
-
             # TD3
             Q_target_next = Q_next.min(1, keepdim=True)[0]
 
@@ -503,8 +370,6 @@ class Agent(object):
             cql_loss = self.compute_cql_loss(state, action, fixed_zsa, fixed_zs)
             critic_loss = td_loss + self.cql_alpha * cql_loss
             critic_loss = LAP_huber(critic_loss)
-
-            self.cql_value += cql_loss.item()
 
             self.critic_optimizer.zero_grad()
             critic_loss.backward()

@@ -114,11 +114,8 @@ def maybe_evaluate_and_print(RL_agent, eval_env, evals, times, ee_values, t, sta
         ee_value = RL_agent.ee_value / args.eval_freq
         RL_agent.ee_value = 0
 
-        cql_value = RL_agent.cql_value / args.eval_freq
-        RL_agent.cql_value = 0
-
         print(f"Timesteps: {(t + 1):,.1f}\tMinutes {time_total:.1f}\tRewards: {score:,.1f}\t"
-              f"EE value: {ee_value:,.5f}\t CQL value: {cql_value:,.5f}")
+              f"EE value: {ee_value:,.5f}")
 
         # Reward
         evals.append(score)
