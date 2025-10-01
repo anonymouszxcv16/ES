@@ -1,4 +1,5 @@
 import copy
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -32,8 +33,9 @@ class Hyperparameters:
     # CQL
     alpha_cql: float = .01
 
-    # SRS
-    alpha_srs: float = 2
+    # ES
+    alpha_max: float = .2
+    alpha_min: float = 0
 
     # Critic Model
     critic_hdim: int = 256
@@ -127,6 +129,7 @@ class Critic(nn.Module):
     def forward(self, state, action):
         sa = torch.cat([state, action], 1)
         q_values = []
+        activations_std = 0
 
         # Ensemble.
         for i in range(self.args.N):
@@ -134,13 +137,14 @@ class Critic(nn.Module):
             q = AvgL1Norm(self.q0[i](sa))
 
             # Fully connected.
-            q = self.activ(self.q1[i](q))
-            q = self.activ(self.q2[i](q))
-            q = self.q3[i](q)
+            q1 = self.activ(self.q1[i](q))
+            q2 = self.activ(self.q2[i](q1))
+            q = self.q3[i](q2)
 
             q_values.append(q)
+            activations_std += (q1.std() + q2.std()) / 2
 
-        return torch.cat([q_value for q_value in q_values], 1)
+        return torch.cat([q_value for q_value in q_values], 1), activations_std / self.args.N
 
 class Agent(object):
     def __init__(self, state_dim, action_dim, max_action, args, hp=Hyperparameters()):
@@ -194,15 +198,23 @@ class Agent(object):
         self.max_target = 0
         self.min_target = 0
 
+        # Auto
+        self.ee_inverse_sum = 0
+
+        # Activations
+        self.activations_std = 0
+
+    def scaled_sigmoid(self, x):
+        return self.hp.alpha_min + (self.hp.alpha_max - self.hp.alpha_min) / (1 + np.exp(-x))
 
     def compute_cql_loss(self, state, action):
         with torch.no_grad():
             # Actor
             actor, _ = self.actor_target(state, deterministic=False)
-            q_values = self.critic_target(state, actor).mean(1, keepdim=True)
+            q_values, _ = self.critic_target(state, actor).mean(1, keepdim=True)
 
             # Current Q-values (for data actions)
-            y = self.critic_target(state, action).mean(1, keepdim=True)
+            y, _ = self.critic_target(state, action).mean(1, keepdim=True)
 
         # Q values actor log sum exp.
         penalty_target = torch.logsumexp(q_values, dim=1, keepdim=True)
@@ -234,26 +246,31 @@ class Agent(object):
             next_action = (next_action + noise).clamp(-1, 1)
 
             # Q-values
-            Q_next = self.critic_target(next_state, next_action)
+            Q_next, activations_std = self.critic_target(next_state, next_action)
             ee_value = Q_next.std(1, keepdim=True).mean().item()
 
             Q_target_next = Q_next.min(1, keepdim=True)[0]
+            self.activations_std += activations_std
 
             # SAC
             entropy_bonus =  next_action_log_prob if "SAC" in self.args.policy else 0
 
-            # SRS.
-            if "SRS" in self.args.policy:
-                # Q-targets.
-                rewards_mean, rewards_max = self.replay_buffer.reward[:self.replay_buffer.size].mean(), self.replay_buffer.reward[:self.replay_buffer.size].max()
-                reward = reward.expand((self.replay_buffer.batch_size, self.args.N)).clone()
-                reward = (1 / self.hp.alpha_srs) * (1 + (self.hp.alpha_srs * ((reward - rewards_mean) / rewards_max)).exp()).log()
+            if self.args.auto_alpha == 1:
+                ee_inverse = 1 / ee_value
+
+                self.ee_inverse_sum += ee_inverse
+
+                if (self.training_steps + self.args.timesteps_before_training) % self.args.auto_alpha_interval == 0:
+                    ee_inverse_mean = self.ee_inverse_sum / self.args.auto_alpha_interval
+                    self.args.alpha = self.scaled_sigmoid(ee_inverse_mean)
+
+                    self.ee_inverse_sum = 0
 
             Q_target_next = Q_target_next - self.hp.alpha_sac * entropy_bonus - (self.args.alpha * ee_value if "EE" in self.args.policy else 0)
             Q_target = reward + not_done * self.args.discount * Q_target_next
 
         # TD loss.
-        Q = self.critic(state, action)
+        Q, _ = self.critic(state, action)
         td_loss = (Q - Q_target).abs()
 
         if "CQL" in self.args.policy:
@@ -278,7 +295,7 @@ class Agent(object):
         # Update Actor.
         if self.training_steps % self.hp.policy_freq == 0:
             actor, _ = self.actor(state)
-            Q = self.critic(state, actor)
+            Q, _ = self.critic(state, actor)
             actor_loss = -Q.mean()
 
             # BC
